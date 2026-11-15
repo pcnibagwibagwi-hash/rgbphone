@@ -273,7 +273,7 @@ if __name__ == "__main__":
 try:
     ns = {"__name__": "rgbcore"}
     exec(compile(CORE, "rgbapp", "exec"), ns)
-    ns["RGBPhoneApp"]().run()
+    ns["App"].run(ns["RGBPhoneApp"]())
 except Exception:
     err = traceback.format_exc()
     from kivy.app import App
