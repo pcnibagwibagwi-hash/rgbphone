@@ -1,3 +1,6 @@
+import traceback
+
+CORE = r'''
 """RGB Phone - Android app that controls your PC's RGB lights through OpenRGB.
 
 PC needs: OpenRGB running with its SDK server reachable on your Wi-Fi (port 6742).
@@ -13,7 +16,7 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
-from kivy.uix.button import Button
+from kivy.uix.button import Buttonc
 from kivy.uix.label import Label
 from kivy.uix.slider import Slider
 from kivy.uix.textinput import TextInput
@@ -264,3 +267,29 @@ class RGBPhoneApp(App):
 
 if __name__ == "__main__":
     RGBPhoneApp().run()
+
+'''
+
+try:
+    ns = {"__name__": "rgbcore"}
+    exec(compile(CORE, "rgbapp", "exec"), ns)
+    ns["RGBPhoneApp"]().run()
+except Exception:
+    err = traceback.format_exc()
+    from kivy.app import App
+    from kivy.core.window import Window
+    from kivy.uix.label import Label
+    from kivy.uix.scrollview import ScrollView
+
+    class ErrApp(App):
+        def build(self):
+            sv = ScrollView()
+            lab = Label(text="ERROR (send screenshot):\n\n" + err,
+                        size_hint_y=None, font_size="12sp",
+                        halign="left", valign="top",
+                        text_size=(Window.width - 20, None))
+            lab.bind(texture_size=lambda w, s: setattr(w, "height", s[1] + 40))
+            sv.add_widget(lab)
+            return sv
+
+    ErrApp().run()
