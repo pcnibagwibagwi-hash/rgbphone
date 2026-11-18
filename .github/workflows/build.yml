@@ -1,39 +1,84 @@
-name: Build APK
+name: Build signed release APK
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check signing secrets exist
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for v in KEYSTORE_B64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "::error::GitHub Secret $v is missing. See README step 'Signing key'."
+              exit 1
+            fi
+          done
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-      - name: Install system packages
+          java-version: "17"
+
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip autoconf automake libtool libltdl-dev pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev build-essential ccache
-      - name: Install Buildozer
+          sudo apt-get install -y git zip unzip autoconf automake libtool libltdl-dev \
+            pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev build-essential
+          pip install buildozer==1.6.0 cython==0.29.36
+
+      - name: Run security tests
         run: |
-          pip install --upgrade pip
-          pip install buildozer cython==0.29.36
-      - name: Build APK
-        shell: bash
+          pip install cryptography
+          python -m unittest discover -s tests -v
+
+      - name: Decode keystore (never uploaded anywhere)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
         run: |
-          buildozer -v android debug 2>&1 | tee build.log
-      - name: Show error
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+          chmod 600 "$RUNNER_TEMP/release.p12"
+
+      - name: Build release APK
+        env:
+          P4A_RELEASE_KEYSTORE: ${{ runner.temp }}/release.p12
+          P4A_RELEASE_KEYSTORE_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
+          P4A_RELEASE_KEYALIAS: ${{ secrets.KEY_ALIAS }}
+          P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.KEY_PASSWORD }}
+        run: buildozer -v android release 2>&1 | tee build.log
+
+      - name: Show error lines if build failed
         if: failure()
-        shell: bash
+        run: grep -n -i -B2 -A8 "error\|exception\|failed" build.log | tail -80
+
+      - name: Verify the APK is signed
         run: |
-          grep -n -B 70 "Command failed" build.log | head -100
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+          APK=$(ls bin/*.apk | head -1)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1 || true)
+          [ -n "$APKSIGNER" ] || APKSIGNER=$(find ~/.buildozer -name apksigner -type f 2>/dev/null | head -1)
+          [ -n "$APKSIGNER" ] || { echo "::error::apksigner not found"; exit 1; }
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.p12"
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: RGBPhone-apk
+          name: RGBPhone-signed-apk
           path: bin/*.apk
