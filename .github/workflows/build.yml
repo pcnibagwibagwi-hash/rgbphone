@@ -60,11 +60,16 @@ jobs:
           P4A_RELEASE_KEYSTORE_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
           P4A_RELEASE_KEYALIAS: ${{ secrets.KEY_ALIAS }}
           P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.KEY_PASSWORD }}
-        run: set -o pipefail; buildozer -v android release 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          for v in P4A_RELEASE_KEYSTORE_PASSWD P4A_RELEASE_KEYALIAS P4A_RELEASE_KEYALIAS_PASSWD; do
+            export "$v=$(printf %s "${!v}" | tr -d '\r\n ')"
+          done
+          buildozer -v android release 2>&1 | tee build.log
 
       - name: Show error lines if build failed
         if: failure()
-        run: tail -n 80 build.log; grep -n -i -B2 -A8 "error\|exception\|failed" build.log | tail -80
+        run: grep -n -B40 "Command failed" build.log | cut -c1-220 | head -80
 
       - name: Verify the APK is signed
         run: |
