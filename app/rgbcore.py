@@ -1,6 +1,7 @@
-"""RGB Phone 2.0 - secure remote for your PC's RGB lights (OpenRGB).
+"""RGB Phone 2.1 (simple mode) - remote for your PC's RGB lights (OpenRGB).
 
-Phone --TLS + pinned certificate + per-device secret--> RGB Gateway on PC --> OpenRGB (127.0.0.1 only).
+Phone --TLS + remembered certificate + short shared password--> RGB Gateway on PC
+--> OpenRGB (127.0.0.1 only).  Home-network only; no PIN / app lock in this version.
 """
 import os
 import threading
@@ -35,8 +36,9 @@ GREY = (0.2, 0.2, 0.25, 1)
 class Lights:
     """Talks to OpenRGB, but only through the authenticated TLS tunnel (never directly)."""
 
-    def __init__(self, get_cfg):
+    def __init__(self, get_cfg, save_cfg=None):
         self.get_cfg = get_cfg
+        self.save_cfg = save_cfg
         self.client = None
         self.rgb = (0, 0, 255)
         self.bright = 100
@@ -51,8 +53,13 @@ class Lights:
     def connect(self):
         from openrgb import OpenRGBClient
         cfg = self.get_cfg()
-        port = tunnel.open_tunnel(cfg["host"], int(cfg.get("port", sec.DEFAULT_GATEWAY_PORT)),
-                                  cfg["pair"])
+        pair = cfg["pair"]
+        port = tunnel.open_tunnel(cfg["host"], int(cfg.get("port", sec.DEFAULT_GATEWAY_PORT)), pair)
+        # Simple mode: remember the PC's certificate after the FIRST accepted login
+        seen = pair.pop("seen_fp", None)
+        if seen and not pair.get("fp") and self.save_cfg:
+            pair["fp"] = seen
+            self.save_cfg()
         self.client = OpenRGBClient("127.0.0.1", port, name="RGB Phone")
         self.direct = False
         self._ensure_direct()
@@ -243,7 +250,7 @@ class RGBPhoneApp(App):
         Window.clearcolor = (0.06, 0.06, 0.1, 1)
         self.cfg_path = os.path.join(self.user_data_dir, "config.json")
         self.cfg = sec.migrate(sec.load_cfg(self.cfg_path))
-        self.lights = Lights(lambda: self.cfg)
+        self.lights = Lights(lambda: self.cfg, lambda: sec.save_cfg(self.cfg_path, self.cfg))
         self._pending = None
         self._bright = 100
         self._color_ev = False
@@ -252,10 +259,10 @@ class RGBPhoneApp(App):
         self.unlocked = False
         self.status = None
         self.root_box = BoxLayout(orientation="vertical", padding=16, spacing=10)
-        if not sec.is_configured(self.cfg):
+        if sec.needs_pairing(self.cfg):
             self.setup_screen()
         else:
-            self.pin_screen()
+            self.main_screen()
         return self.root_box
 
     # ----- helpers
@@ -288,203 +295,53 @@ class RGBPhoneApp(App):
             self._tick.cancel()
             self._tick = None
 
-    def watch_lock(self):
-        """While locked, show a live countdown."""
-        self.stop_tick()
-
-        def tick(_dt):
-            left = sec.lock_remaining(self.cfg)
-            if left:
-                self.msg.text = "Bahut galat try. %d second ruko" % left
-            else:
-                self.msg.text = ""
-                self.stop_tick()
-        if sec.lock_remaining(self.cfg):
-            tick(0)
-            self._tick = Clock.schedule_interval(tick, 1)
-
-    # ----- first-time setup
-    def setup_screen(self):
-        col = self.page("RGB Phone setup")
-        self.note(col, "1) PC par gateway chalu karo aur 'add-device' se pairing code lo (README dekho).")
-        self.ip_in = field(text=self.cfg.get("host", ""), hint_text="PC IP (jaise 192.168.1.8)")
+    # ----- setup / settings (simple mode: PC IP + one short shared password)
+    def setup_screen(self, first=True):
+        col = self.page("RGB Phone setup" if first else "PC / password")
+        self.note(col, "PC par 'set_password.bat' se jo password chuna tha, wo yahan daalo. "
+                       "Dost bhi apne PC ka IP aur apna password daalenge.")
+        self.ip_in = field(text=self.cfg.get("host", ""), hint_text="PC IP (jaise 192.168.1.8)",
+                           keyboard_suggestions=False)
         col.add_widget(self.ip_in)
         self.port_in = field(text=str(self.cfg.get("port", sec.DEFAULT_GATEWAY_PORT)),
                              hint_text="Port", input_filter="int")
         col.add_widget(self.port_in)
-        self.pair_in = field(hint_text="Pairing code (RGB1....)")
-        col.add_widget(self.pair_in)
-        self.note(col, "2) Apna PIN banao (6 se 12 digit, 123456 jaisa easy nahi):")
-        self.pin1 = pin_field("PIN")
-        self.pin2 = pin_field("PIN dobara")
-        col.add_widget(self.pin1)
-        col.add_widget(self.pin2)
+        self.pw_in = field(hint_text="Password", keyboard_suggestions=False)
+        col.add_widget(self.pw_in)
         self.msg_label(col)
         col.add_widget(button("Save", self.save_setup))
+        if not first:
+            col.add_widget(button("Wapas", self.main_screen, background_color=GREY))
 
     def read_connection(self):
-        """Validate host/port/pairing fields. Returns (error, host, port, pair)."""
+        """Validate IP/port/password. Returns (error, host, port, pair).
+
+        Also accepts a long 'RGB1....' pairing code (strict mode) in the password box."""
         err = sec.validate_host(self.ip_in.text)
-        host = self.ip_in.text.strip()
-        port = sec.validate_port(self.port_in.text)
-        pair = sec.parse_pairing_code(self.pair_in.text)
         if err:
             return err, None, None, None
+        host = self.ip_in.text.strip()
+        port = sec.validate_port(self.port_in.text)
         if port is None:
             return "Port 1024-65535 ke beech ho (aam taur par 6743)", None, None, None
+        text = self.pw_in.text.strip()
+        pair = sec.parse_pairing_code(text) if text.startswith("RGB1.") else None
         if pair is None:
-            return "Pairing code galat hai. Poora code copy karo (RGB1. se shuru)", None, None, None
+            err = sec.validate_password(text)
+            if err:
+                return err, None, None, None
+            pair = sec.make_simple_pair(text)
         return None, host, port, pair
 
     def save_setup(self):
         err, host, port, pair = self.read_connection()
-        if not err and self.pin1.text != self.pin2.text:
-            err = "Dono PIN same nahi hain"
-        if not err:
-            err = sec.validate_pin(self.pin1.text)
         if err:
             self.msg.text = err
             return
-        self.cfg.update({"host": host, "port": port, "pair": pair})
-        code = sec.create_pin(self.cfg, self.cfg_path, self.pin1.text)
-        self.recovery_screen(code, then=self.main_screen)
-
-    def recovery_screen(self, code, then):
-        col = self.page("Recovery code")
-        self.note(col, "Ye code ABHI kahin likh lo (kagaz par). PIN bhool gaye to sirf yahi kaam aayega. "
-                       "Ye dobara nahi dikhega.")
-        l = lbl(sec.format_recovery(code), font_size="26sp", size_hint_y=None, height=80)
-        col.add_widget(l)
-        col.add_widget(button("Maine likh liya", then))
-
-    # ----- PIN screen
-    def pin_screen(self):
-        self.unlocked = False
-        self.lights.close()
-        col = self.page("RGB Phone")
-        self.pin_in = pin_field("PIN")
-        col.add_widget(self.pin_in)
-        self.msg_label(col)
-        col.add_widget(button("Unlock", self.try_pin))
-        col.add_widget(button("PIN bhool gaye? (recovery code)", self.forgot_screen,
-                              font_size="14sp", background_color=GREY))
-        self.watch_lock()
-
-    def try_pin(self):
-        ok, msg = sec.unlock(self.cfg, self.cfg_path, self.pin_in.text)
-        self.pin_in.text = ""
-        if not ok:
-            self.msg.text = msg
-            self.watch_lock()
-            return
-        self.unlocked = True
-        if sec.needs_pairing(self.cfg):
-            self.connection_screen(first=True)
-        else:
-            self.main_screen()
-
-    # ----- forgot PIN: needs recovery code, NOT a free reset
-    def forgot_screen(self):
-        col = self.page("PIN reset")
-        self.note(col, "Recovery code likho (setup ke time mila tha).")
-        self.rec_in = field(hint_text="XXXX-XXXX-XXXX-XXXX-XXXX")
-        col.add_widget(self.rec_in)
-        self.n1 = pin_field("Naya PIN")
-        self.n2 = pin_field("Naya PIN dobara")
-        col.add_widget(self.n1)
-        col.add_widget(self.n2)
-        self.msg_label(col)
-        col.add_widget(button("PIN reset karo", self.do_forgot))
-        col.add_widget(button("Wapas", self.pin_screen, background_color=GREY))
-        self.watch_lock()
-
-    def do_forgot(self):
-        if self.n1.text != self.n2.text:
-            self.msg.text = "Dono PIN same nahi hain"
-            return
-        ok, msg, code = sec.reset_pin_with_recovery(self.cfg, self.cfg_path, self.rec_in.text,
-                                                    self.n1.text)
-        if not ok:
-            self.msg.text = msg
-            self.watch_lock()
-            return
-        self.recovery_screen(code, then=self.pin_screen)
-
-    # ----- settings (every change needs the current PIN)
-    def settings_screen(self):
-        col = self.page("Settings")
-        col.add_widget(button("PC / pairing badlo", self.connection_screen))
-        col.add_widget(button("PIN badlo", self.change_pin_screen))
-        col.add_widget(button("Naya recovery code", self.new_recovery_screen))
-        col.add_widget(button("Wapas", self.main_screen, background_color=GREY))
-
-    def connection_screen(self, first=False):
-        col = self.page("PC / pairing")
-        self.ip_in = field(text=self.cfg.get("host", ""), hint_text="PC IP")
-        self.port_in = field(text=str(self.cfg.get("port", sec.DEFAULT_GATEWAY_PORT)),
-                             hint_text="Port", input_filter="int")
-        self.pair_in = field(hint_text="Naya pairing code (RGB1....)")
-        for w in (self.ip_in, self.port_in, self.pair_in):
-            col.add_widget(w)
-        self.cur = pin_field("Abhi ka PIN")
-        if not first:
-            col.add_widget(self.cur)
-        self.msg_label(col)
-        col.add_widget(button("Save", lambda: self.save_connection(first)))
-        if not first:
-            col.add_widget(button("Wapas", self.settings_screen, background_color=GREY))
-
-    def save_connection(self, first):
-        err, host, port, pair = self.read_connection()
-        if err:
-            self.msg.text = err
-            return
-        if not first:
-            ok, msg = sec.guarded_check(self.cfg, self.cfg_path, self.cfg.get("pin"), self.cur.text)
-            if not ok:
-                self.msg.text = msg
-                return
         self.cfg.update({"host": host, "port": port, "pair": pair})
         sec.save_cfg(self.cfg_path, self.cfg)
         self.lights.close()
         self.main_screen()
-
-    def change_pin_screen(self):
-        col = self.page("PIN badlo")
-        self.cur = pin_field("Abhi ka PIN")
-        self.n1 = pin_field("Naya PIN")
-        self.n2 = pin_field("Naya PIN dobara")
-        for w in (self.cur, self.n1, self.n2):
-            col.add_widget(w)
-        self.msg_label(col)
-        col.add_widget(button("Save", self.do_change_pin))
-        col.add_widget(button("Wapas", self.settings_screen, background_color=GREY))
-
-    def do_change_pin(self):
-        if self.n1.text != self.n2.text:
-            self.msg.text = "Dono PIN same nahi hain"
-            return
-        ok, msg, _ = sec.change_pin(self.cfg, self.cfg_path, self.cur.text, self.n1.text)
-        if ok:
-            self.settings_screen()
-        else:
-            self.msg.text = msg
-
-    def new_recovery_screen(self):
-        col = self.page("Naya recovery code")
-        self.note(col, "Purana recovery code kaam karna band kar dega.")
-        self.cur = pin_field("Abhi ka PIN")
-        col.add_widget(self.cur)
-        self.msg_label(col)
-        col.add_widget(button("Naya code banao", self.do_new_recovery))
-        col.add_widget(button("Wapas", self.settings_screen, background_color=GREY))
-
-    def do_new_recovery(self):
-        ok, msg, code = sec.rotate_recovery(self.cfg, self.cfg_path, self.cur.text)
-        if ok:
-            self.recovery_screen(code, then=self.settings_screen)
-        else:
-            self.msg.text = msg
 
     # ----- main screen (all lighting controls)
     def main_screen(self):
@@ -496,8 +353,8 @@ class RGBPhoneApp(App):
         self.status = lbl("Connecting...", halign="left")
         self.status.bind(size=lambda w, s: setattr(w, "text_size", s))
         top.add_widget(self.status)
-        top.add_widget(button("Lock", self.pin_screen, size_hint_x=0.22, size_hint_y=1))
-        top.add_widget(button("Settings", self.settings_screen, size_hint_x=0.3, size_hint_y=1))
+        top.add_widget(button("Settings", lambda: self.setup_screen(first=False),
+                              size_hint_x=0.3, size_hint_y=1))
         r.add_widget(top)
 
         self.ring = HueRing(self.on_ring, size_hint_y=0.45)
@@ -528,13 +385,12 @@ class RGBPhoneApp(App):
 
         self.run_bg(self.lights.connect, note="Connected")
 
-    # ----- auto-lock when the app goes to background
+    # ----- app goes to background / comes back (no lock in simple mode)
     def on_pause(self):
         return True
 
     def on_resume(self):
-        if self.unlocked and sec.is_configured(self.cfg):
-            self.pin_screen()
+        pass
 
     def on_stop(self):
         self.lights.close()

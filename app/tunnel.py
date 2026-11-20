@@ -4,8 +4,9 @@ OpenRGB's SDK server speaks plain, unauthenticated TCP.  Instead of exposing it 
 the Wi-Fi, the PC runs `rgb_gateway.py` (TLS + per-device secret).  This module:
 
   1. checks the PC address is a private LAN address (never the public internet),
-  2. opens TLS to the gateway and PINS its certificate fingerprint (from the pairing code),
-  3. authenticates with the per-device secret,
+  2. opens TLS to the gateway and PINS its certificate fingerprint (from the pairing code,
+     or - in simple mode - remembered from the first successful connect),
+  3. authenticates with the per-device secret / shared password,
   4. opens a single-use listener on 127.0.0.1:<random port> that the OpenRGB client
      connects to; bytes are piped through the TLS connection.
 
@@ -87,9 +88,14 @@ def connect_and_auth(host, port, pair, timeout=CONNECT_TIMEOUT):
     try:
         der = s.getpeercert(binary_form=True) or b""
         fp = hashlib.sha256(der).hexdigest()[:32]
-        if not hmac.compare_digest(fp, pair["fp"]):
-            raise TunnelError("Gateway ka certificate pairing code se match nahi karta! "
-                              "Koi aur device PC ban raha ho sakta hai. Naya pairing code lo.")
+        pinned = pair.get("fp")
+        if pinned and not hmac.compare_digest(fp, pinned):
+            raise TunnelError("PC ki pehchaan badal gayi hai (ya koi aur PC ban raha hai). "
+                              "Agar aapne PC/gateway dobara install kiya ho to Settings mein "
+                              "'PC / password badlo' se dobara save karo.")
+        # No pinned fingerprint yet (simple mode, first connect): remember what we saw.
+        # The caller stores it only AFTER the password was accepted.
+        pair["seen_fp"] = fp
         s.settimeout(AUTH_TIMEOUT)
         s.sendall(MAGIC + b"\n" + pair["name"].encode() + b"\n" + pair["secret"].encode() + b"\n")
         reply = _readline(s)
@@ -100,7 +106,7 @@ def connect_and_auth(host, port, pair, timeout=CONNECT_TIMEOUT):
             raise TunnelError("Gateway ne is device ko kuch der ke liye rok diya (bahut galat try)")
         if reply == b"DOWN":
             raise TunnelError("OpenRGB server band hai. PC par OpenRGB mein SDK Server start karo")
-        raise TunnelError("Pairing code galat ya revoke ho chuka hai")
+        raise TunnelError("Password galat hai (ya PC par set nahi hua)")
     except TunnelError:
         s.close()
         raise

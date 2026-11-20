@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 
 ITERATIONS = 600_000          # PBKDF2-HMAC-SHA256 (OWASP 2023 minimum for SHA-256)
@@ -84,21 +85,25 @@ def load_cfg(path):
     return migrate(cfg)
 
 
+_SAVE_LOCK = threading.Lock()   # the UI thread and the connection thread can both save
+
+
 def save_cfg(path, cfg):
-    """Atomic write, owner-only permissions."""
-    folder = os.path.dirname(path)
-    os.makedirs(folder, exist_ok=True)
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(cfg, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    """Atomic write, owner-only permissions (safe to call from several threads)."""
+    with _SAVE_LOCK:
+        folder = os.path.dirname(path)
+        os.makedirs(folder, exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
 
 def migrate(cfg):
@@ -249,6 +254,31 @@ def parse_pairing_code(text):
     if not m:
         return None
     return {"fp": m.group(1), "name": m.group(2), "secret": m.group(3)}
+
+
+# ------------------------------------------------- simple shared password ---
+# "Simple mode": the PC has ONE short shared password (set with set_password.bat);
+# the phone only needs the PC's IP + that password.  The app sends it under the fixed
+# device name "app".  The PC's certificate is remembered on first connect (trust on first use).
+SIMPLE_DEVICE_NAME = "app"
+PASSWORD_MIN = 6
+PASSWORD_MAX = 24
+_PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def validate_password(pw):
+    """Return None if OK, otherwise a short message (same rules as the PC side)."""
+    pw = pw or ""
+    if len(pw) < PASSWORD_MIN or len(pw) > PASSWORD_MAX:
+        return "Password %d se %d akshar ka ho" % (PASSWORD_MIN, PASSWORD_MAX)
+    if not _PASSWORD_RE.match(pw):
+        return "Password mein sirf akshar (a-z, A-Z), number, - aur _ ho; space nahi"
+    return None
+
+
+def make_simple_pair(password):
+    """Pair record for simple mode.  fp is None until the first successful connect."""
+    return {"fp": None, "name": SIMPLE_DEVICE_NAME, "secret": password}
 
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
