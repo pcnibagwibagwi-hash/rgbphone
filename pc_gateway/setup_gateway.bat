@@ -24,5 +24,5 @@ if errorlevel 1 ( echo Python/pip not found. Install Python from python.org firs
 echo [4/4] Creating the gateway certificate...
 python rgb_gateway.py init
 echo.
-echo DONE. Next: double-click add_device.bat to get your pairing code.
+echo DONE. Next: double-click set_password.bat to choose your short password.
 pause

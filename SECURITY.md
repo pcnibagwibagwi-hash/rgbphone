@@ -38,6 +38,20 @@ Nothing was removed from the app: colour ring, brightness, 8 presets, Rainbow, O
 | cryptography (PC `init` + keystore tool) | 50.0.1 tested | PC/dev only, not in the APK. pip-audit clean. |
 | GitHub Actions | checkout@v4, setup-python@v5, setup-java@v4 | Version tags, not commit hashes. Workflow permissions: `contents: read`. The unmaintained third-party buildozer action was removed. |
 
+## Version 2.1: "simple password" mode (chosen by the owner for convenience)
+The owner asked for less friction (share with friends, no long codes). What changed and what did NOT:
+* **Removed from the app:** PIN, recovery code, app lock. Anyone holding the phone can use the lights.
+* **Phone login:** PC IP + one short shared password (6-24 chars). Stored on the PC only as a salted
+  PBKDF2-SHA256 hash (`password.json`, owner-only). The gateway still locks an address out after 5 wrong tries
+  (60 s doubling up to 1 h) - but a short password is guessable by someone on your Wi-Fi who waits out the locks.
+  Use something not obvious (not `123456`).
+* **Certificate:** the app remembers the PC's certificate fingerprint after the first accepted login
+  (trust on first use). Anyone impersonating the PC on that very first connect could read the password; after
+  that, a different PC is refused.
+* **Unchanged:** TLS 1.2+, LAN-only (public IPs refused), OpenRGB itself stays on 127.0.0.1, signed APK,
+  backups off, only the INTERNET permission, strict `add_device.bat` mode still works.
+* Password reset on the PC: run `set_password.bat` again (takes effect immediately).
+
 ## Honest limits (please read)
 * I could **not** build or sign the Android APK, or run the Windows `.bat` files, in my environment. Python logic, gateway, tunnel and UI were tested (32 automated tests + 22 UI checks). The first GitHub build is the real test.
 * Phone clock changed backwards can shorten a lockout.

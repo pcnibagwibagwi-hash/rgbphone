@@ -4,7 +4,7 @@ package.name = rgbphone
 package.domain = org.rgbphone
 source.dir = app
 source.include_exts = py
-version = 2.0
+version = 2.1
 requirements = python3,kivy==2.3.0,openrgb-python==0.3.8,openssl
 orientation = portrait
 fullscreen = 0

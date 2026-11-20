@@ -93,7 +93,7 @@ class AuthFailures(Base):
     def test_wrong_fingerprint_refused_before_secret_is_sent(self):
         bad = dict(self.pair, fp="0" * 32)
         with self.assertRaises(T.TunnelError) as cm: self.tunnel(bad)
-        self.assertIn("certificate", str(cm.exception).lower())
+        self.assertIn("pehchaan", str(cm.exception).lower())
         self.assertEqual(self.gw.throttle.table, {})          # gateway never saw a credential attempt
         self.assertEqual(self.fake.connections, 0)
 

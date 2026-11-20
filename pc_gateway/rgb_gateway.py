@@ -8,7 +8,9 @@ from the Wi-Fi.  This gateway is what the phone talks to instead:
 
 Commands:
   python rgb_gateway.py init                 one-time: create the certificate
-  python rgb_gateway.py add-device NAME      create a pairing code for one phone
+  python rgb_gateway.py set-password PASS    SIMPLE MODE: one short shared password (6-24 chars)
+  python rgb_gateway.py clear-password       turn simple mode off again
+  python rgb_gateway.py add-device NAME      create a pairing code for one phone (strict mode)
   python rgb_gateway.py list                 show paired devices / settings
   python rgb_gateway.py revoke NAME          remove a phone (takes effect immediately)
   python rgb_gateway.py allow-ip IP          optional: ONLY accept these phone IPs
@@ -198,8 +200,33 @@ def pipe(a, b, idle=IDLE_TIMEOUT):
                 pass
 
 
+SIMPLE_NAME = "app"                  # device name the phone app uses in simple (password) mode
+PW_RE = re.compile(r"^[A-Za-z0-9_-]{6,24}$")
+PW_ITER = 100_000
+
+
+def hash_password(pw, salt=None, iterations=PW_ITER):
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), iterations)
+    return {"salt": salt, "iter": iterations, "hash": digest.hex()}
+
+
+def check_password(secret):
+    """Check the shared simple-mode password (re-read each time so changes apply instantly)."""
+    rec = load_json("password.json", {})
+    try:
+        calc = hashlib.pbkdf2_hmac("sha256", (secret or "").encode("utf-8"),
+                                   bytes.fromhex(rec["salt"]), int(rec["iter"])).hex()
+        return hmac.compare_digest(calc, rec["hash"])
+    except (KeyError, ValueError, TypeError):
+        return False
+
+
 def check_device(name, secret):
-    """Constant-time-ish check against devices.json (re-read each time so `revoke` is instant)."""
+    """Constant-time-ish check against devices.json (re-read each time so `revoke` is instant).
+    Name 'app' is the simple mode: it uses the shared password from password.json."""
+    if name == SIMPLE_NAME:
+        return check_password(secret)
     devices = load_json("devices.json", {})
     entry = devices.get(name) if NAME_RE.match(name or "") else None
     stored = entry.get("sha256", "") if isinstance(entry, dict) else "0" * 64
@@ -365,6 +392,9 @@ def cmd_add(args):
     if not NAME_RE.match(name):
         print("Name: 1-24 letters/digits/-/_ only")
         return 1
+    if name == SIMPLE_NAME:
+        print("Name '%s' simple password mode ke liye reserved hai. Koi aur naam chuno." % name)
+        return 1
     devices = load_json("devices.json", {})
     if name in devices:
         print("A device named '%s' already exists. Revoke it first." % name)
@@ -381,6 +411,29 @@ def cmd_add(args):
     return 0
 
 
+def cmd_set_password(args):
+    if not os.path.exists(path("cert.pem")):
+        print("Run  python rgb_gateway.py init  first")
+        return 1
+    if not PW_RE.match(args.password):
+        print("Password 6-24 characters ka ho: sirf letters, numbers, - aur _ (space nahi)")
+        return 1
+    write_private(path("password.json"), json.dumps(hash_password(args.password)))
+    print("Password set ho gaya. Phone app mein PC ka IP aur yahi password daalo.")
+    print("(Gateway sirf iska hash save karta hai; password khud nahi.)")
+    return 0
+
+
+def cmd_clear_password(_args):
+    try:
+        os.remove(path("password.json"))
+    except OSError:
+        print("Koi password set nahi tha")
+        return 1
+    print("Simple password hata diya. Ab phone sirf add-device wale code se judega.")
+    return 0
+
+
 def cmd_list(_args):
     cfg = load_config()
     devices = load_json("devices.json", {})
@@ -388,6 +441,7 @@ def cmd_list(_args):
           cfg["openrgb_host"], cfg["openrgb_port"])
     print("Trusted IPs:", cfg["trusted_ips"] or "(any private LAN address)")
     print("Paired devices:", ", ".join(devices) or "(none)")
+    print("Simple password:", "set" if os.path.exists(path("password.json")) else "not set")
     return 0
 
 
@@ -448,6 +502,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("init"); s.add_argument("--force", action="store_true"); s.set_defaults(f=cmd_init)
     s = sub.add_parser("add-device"); s.add_argument("name"); s.set_defaults(f=cmd_add)
+    s = sub.add_parser("set-password"); s.add_argument("password"); s.set_defaults(f=cmd_set_password)
+    s = sub.add_parser("clear-password"); s.set_defaults(f=cmd_clear_password)
     s = sub.add_parser("list"); s.set_defaults(f=cmd_list)
     s = sub.add_parser("revoke"); s.add_argument("name"); s.set_defaults(f=cmd_revoke)
     s = sub.add_parser("allow-ip"); s.add_argument("ip"); s.set_defaults(f=lambda a: cmd_ip(a, True))
