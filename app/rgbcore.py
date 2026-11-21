@@ -22,6 +22,7 @@ from kivy.uix.widget import Widget
 
 import security as sec
 import tunnel
+import esp32
 
 # Pure LED colours (washed-out mixes like 225,29,29 look pink on LEDs)
 PRESETS = [
@@ -251,6 +252,7 @@ class RGBPhoneApp(App):
         self.cfg_path = os.path.join(self.user_data_dir, "config.json")
         self.cfg = sec.migrate(sec.load_cfg(self.cfg_path))
         self.lights = Lights(lambda: self.cfg, lambda: sec.save_cfg(self.cfg_path, self.cfg))
+        self.home = esp32.Esp32(lambda: self.cfg.get("esp_host", ""))
         self._pending = None
         self._bright = 100
         self._color_ev = False
@@ -353,8 +355,10 @@ class RGBPhoneApp(App):
         self.status = lbl("Connecting...", halign="left")
         self.status.bind(size=lambda w, s: setattr(w, "text_size", s))
         top.add_widget(self.status)
+        top.add_widget(button("Ghar", self.home_screen, size_hint_x=0.22, size_hint_y=1,
+                              background_color=(0.1, 0.45, 0.3, 1)))
         top.add_widget(button("Settings", lambda: self.setup_screen(first=False),
-                              size_hint_x=0.3, size_hint_y=1))
+                              size_hint_x=0.28, size_hint_y=1))
         r.add_widget(top)
 
         self.ring = HueRing(self.on_ring, size_hint_y=0.45)
@@ -384,6 +388,71 @@ class RGBPhoneApp(App):
         r.add_widget(row)
 
         self.run_bg(self.lights.connect, note="Connected")
+
+    # ----- home screen: Light + Fan (relay) + RGB LED strip on the ESP32 (home Wi-Fi only)
+    def home_screen(self):
+        self.stop_tick()
+        r = self.root_box
+        r.clear_widgets()
+        top = BoxLayout(size_hint_y=0.07, spacing=8)
+        self.status = lbl("Ghar control", halign="left")
+        self.status.bind(size=lambda w, s: setattr(w, "text_size", s))
+        top.add_widget(self.status)
+        top.add_widget(button("Wapas", self.main_screen, size_hint_x=0.28, size_hint_y=1,
+                              background_color=GREY))
+        r.add_widget(top)
+
+        ip_row = BoxLayout(size_hint_y=0.09, spacing=8)
+        self.esp_in = field(text=self.cfg.get("esp_host", ""), hint_text="ESP32 IP (jaise 192.168.1.50)",
+                            keyboard_suggestions=False, size_hint_y=1)
+        ip_row.add_widget(self.esp_in)
+        ip_row.add_widget(button("Save", self.save_esp, size_hint_x=0.25, size_hint_y=1))
+        r.add_widget(ip_row)
+
+        for name, call in (("Light", self.home.light), ("Fan", self.home.fan)):
+            row = BoxLayout(size_hint_y=0.1, spacing=8)
+            row.add_widget(lbl(name, font_size="22sp", size_hint_x=0.3))
+            row.add_widget(button("ON", lambda c=call: self.run_bg(c, True), size_hint_y=1,
+                                  font_size="22sp", background_color=(0.1, 0.55, 0.3, 1)))
+            row.add_widget(button("OFF", lambda c=call: self.run_bg(c, False), size_hint_y=1,
+                                  font_size="22sp", background_color=(0.6, 0.2, 0.2, 1)))
+            r.add_widget(row)
+
+        r.add_widget(lbl("RGB LED", size_hint_y=0.04))
+        self.ring = HueRing(self.on_ring_esp, size_hint_y=0.3)
+        r.add_widget(self.ring)
+
+        grid = GridLayout(cols=4, spacing=8, size_hint_y=0.12)
+        for name, rgb in PRESETS:
+            btn = Button(text=name, background_normal="", font_size="14sp",
+                         background_color=(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, 1),
+                         color=(0, 0, 0, 1) if name in ("White", "Cyan", "Green") else (1, 1, 1, 1))
+            btn.bind(on_release=lambda _b, c=rgb: self.run_bg(self.home.rgb, c))
+            grid.add_widget(btn)
+        r.add_widget(grid)
+
+        r.add_widget(button("RGB Off", lambda: self.run_bg(self.home.rgb_off), size_hint_y=0.08,
+                            background_color=GREY))
+
+    def save_esp(self):
+        host = self.esp_in.text.strip()
+        err = sec.validate_host(host) if host else "ESP32 ka IP likho"
+        if err:
+            self.set_status(err)
+            return
+        self.cfg["esp_host"] = host
+        sec.save_cfg(self.cfg_path, self.cfg)
+        self.set_status("ESP32 IP save ho gaya")
+
+    def on_ring_esp(self, rgb):
+        self._pending = rgb
+        if not self._color_ev:
+            self._color_ev = True
+            Clock.schedule_once(self._flush_color_esp, 0.15)
+
+    def _flush_color_esp(self, _dt):
+        self._color_ev = False
+        self.run_bg(self.home.rgb, self._pending)
 
     # ----- app goes to background / comes back (no lock in simple mode)
     def on_pause(self):
